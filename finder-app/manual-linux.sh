@@ -78,10 +78,20 @@ else
     cd busybox
 fi
 
+ [ ! -d "${OUTDIR}/busybox" ]; then
+    git clone --depth 1 https://busybox.net/git/busybox.git busybox
+    cd busybox
+    git checkout ${BUSYBOX_VERSION}
+    make distclean
+    make defconfig
+else
+    cd busybox
+fi
+
+
 # Completed: Make and install busybox
 
 make ARCH=${ARCH} CROSS_COMPILE=${CROSS_COMPILE} CONFIG_PREFIX=${OUTDIR}/rootfs install
-make CONFIG_PREFIX=${OUTDIR}/rootfs ARCH=${ARCH} CROSS_COMPILE=${CROSS_COMPILE} install
 
 echo "Library dependencies"
 ${CROSS_COMPILE}readelf -a ${OUTDIR}/rootfs/bin/busybox | grep "program interpreter"
