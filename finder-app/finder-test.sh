@@ -55,7 +55,7 @@ fi
 
 for i in $( seq 1 $NUMFILES)
 do
-	/etc/finder-app/writer "$WRITEDIR/${username}$i.txt" "$WRITESTR"
+	/etc/finder-app/writer.sh "$WRITEDIR/${username}$i.txt" "$WRITESTR"
 done
 
 OUTPUTSTRING=$(/etc/finder-app/finder.sh "$WRITEDIR" "$WRITESTR")
