@@ -1,18 +1,16 @@
-CC = gcc
+CC ?= gcc
 CFLAGS = -Wall -Wextra -O3
-TARGET = aesdsocket
+TARGET = server/aesdsocket
 SRCS = aesdsocket.c
 
-ifneq ($(CROSS_COMPILE),)
+ifdef CROSS_COMPILE
     CC = $(CROSS_COMPILE)gcc
-else
-     $(info Using default compiler: $(CC))
 endif
 
+all default: $(TARGET)
 
+$(TARGET): $(SRCS)
+	$(CC) $(CFLAGS) $< -o $@
 
-all : $(TARGET)
-	${CC} $(CFLAGS) -c $(SRCS) -o $(TARGET).o
-	${CC} $(CFLAGS) $(TARGET).o -o $(TARGET)
-clean :
-	rm -f $(TARGET) *.o
+clean:
+	rm -f $(TARGET)
