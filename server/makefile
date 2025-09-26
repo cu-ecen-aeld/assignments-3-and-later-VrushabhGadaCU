@@ -1,6 +1,6 @@
 CC ?= gcc
 CFLAGS = -Wall -Wextra -O3
-TARGET = server/aesdsocket
+TARGET = aesdsocket
 SRCS = aesdsocket.c
 
 ifdef CROSS_COMPILE
