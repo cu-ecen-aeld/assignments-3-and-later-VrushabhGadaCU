@@ -191,7 +191,6 @@ int main(int argc, char *argv[])
                     {
                         clenanup(-1);
                     }
-                    // TODO: Check for if this works later
                     // Send entire file contents back to client
                     ssize_t bytes_read;
                     char read_buffer[BUFFER_SIZE];
