@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netdb.h>
@@ -8,8 +9,14 @@
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <pthread.h>
 #include <stdio.h>
+#include <sys/queue.h>
+#include <stdatomic.h>
+#include <time.h>
 
+pthread_t timer_thread_id;
+#define MAX_CLIENTS 10
 #define BUFFER_SIZE 1024
 #define DATA_FILE "/var/tmp/aesdsocketdata"
 int waiting_for_connection = 0;
@@ -17,16 +24,73 @@ int waiting_for_connection = 0;
 int sockfd = -1;
 int new_fd = -1;
 int fd = -1;
-char *packet = NULL;
+
 struct addrinfo *servinfo;
 volatile sig_atomic_t exit_flag = 0;
+pthread_mutex_t mutex_lock = PTHREAD_MUTEX_INITIALIZER;
+
+typedef struct thread_list_s
+{
+    pthread_t thread_id;
+    int client_fd;
+    char client_ip[INET_ADDRSTRLEN];
+    SLIST_ENTRY(thread_list_s)
+    entries;
+} thread_list_t;
+
+SLIST_HEAD(slisthead, thread_list_s)
+head;
+
+void *timestamp_thread(void *arg)
+{
+    (void)arg;
+    while (!exit_flag)
+    {
+        sleep(10);
+        
+
+        time_t now;
+        struct tm *timeinfo;
+        char timestamp[200];
+
+        time(&now);
+        timeinfo = localtime(&now);
+
+        strftime(timestamp, sizeof(timestamp), "timestamp:%a, %d %b %Y %H:%M:%S %z\n", timeinfo);
+
+        pthread_mutex_lock(&mutex_lock);
+        
+        fd = open(DATA_FILE, O_WRONLY | O_APPEND | O_CREAT, 0664);
+		if (fd == -1){
+			perror("open");
+			syslog(LOG_ERR, "open");
+			exit(1);
+		}
+        if (fd != -1)
+        {
+            ssize_t written = write(fd, timestamp, strlen(timestamp));
+            if (written == -1)
+            {
+                syslog(LOG_ERR, "Error writing timestamp: %s", strerror(errno));
+            }
+            else if ((size_t)written < strlen(timestamp))
+            {
+                syslog(LOG_WARNING, "Partial write of timestamp");
+            }
+        }
+        else
+        {
+            syslog(LOG_ERR, "Error opening file for timestamp: %s", strerror(errno));
+        }
+        close(fd);
+
+        pthread_mutex_unlock(&mutex_lock);
+    }
+    return NULL;
+}
+
 void clenanup(int return_code)
 {
-    if (packet)
-    {
-        free(packet);
-        packet = NULL;
-    }
     if (fd != -1)
         close(fd);
     if (new_fd != -1)
@@ -35,6 +99,24 @@ void clenanup(int return_code)
         close(sockfd);
     if (servinfo)
         freeaddrinfo(servinfo);
+
+    printf("Joining timer thread\n");
+
+    pthread_join(timer_thread_id, NULL);
+    thread_list_t *current = SLIST_FIRST(&head);
+
+    while (current != NULL)
+    {
+        thread_list_t *next = SLIST_NEXT(current, entries);
+        int ret = pthread_join(current->thread_id, NULL);
+        if (ret == 0)
+        {
+            SLIST_REMOVE(&head, current, thread_list_s, entries);
+            free(current);
+        }
+        current = next;
+    }
+
     remove(DATA_FILE);
     exit(return_code); // Changed from exit(0) to exit(return_code)
 }
@@ -44,14 +126,98 @@ void signal_handler(int sig)
     syslog(LOG_INFO, "Caught signal, exiting");
     exit_flag = 1;
 
-    if (waiting_for_connection)
+    // clenanup(0);
+}
+
+void *handle_client(void *arg)
+{
+    thread_list_t *thread_data = (thread_list_t *)arg;
+    char buffer[BUFFER_SIZE];
+    int bytes_received = 0;
+    int send_enable = 0;
+    while (((bytes_received = recv(thread_data->client_fd, buffer, sizeof(buffer) - 1, 0)) > 0) && (!exit_flag))
     {
-        clenanup(0);
+        if (buffer[bytes_received - 1] == '\n')
+            send_enable = 1;
+
+        pthread_mutex_lock(&mutex_lock);
+        fd = open(DATA_FILE, O_WRONLY | O_APPEND | O_CREAT, 0664);
+        if (fd == -1)
+        {
+
+            syslog(LOG_ERR, "Error opening file %s: %s", DATA_FILE, strerror(errno));
+            pthread_mutex_unlock(&mutex_lock);
+            close(thread_data->client_fd);
+            return NULL;
+        }
+        int ret = write(fd, buffer, bytes_received);
+        if (ret == -1)
+        {
+            syslog(LOG_ERR, "Error writing to file %s: %s", DATA_FILE, strerror(errno));
+            pthread_mutex_unlock(&mutex_lock);
+            close(thread_data->client_fd);
+            return NULL;
+        }
+        close(fd);
+        pthread_mutex_unlock(&mutex_lock);
+
+        if (!send_enable)
+            continue;
+        else
+        {
+            int read_byte = 0;
+            int read_fd = open(DATA_FILE, O_RDONLY);
+            char send_buf[BUFFER_SIZE];
+            if (read_fd == -1)
+            {
+                perror("open");
+                syslog(LOG_ERR, "open");
+                return NULL;
+            }
+
+            while ((read_byte = read(read_fd, send_buf, sizeof(send_buf))) > 0)
+            {
+                if (read_byte == -1)
+                {
+                    perror("read");
+                    syslog(LOG_ERR, "read");
+                    return NULL;
+                }
+
+                read_byte = send(thread_data->client_fd, send_buf, read_byte, 0);
+                if (read_byte == -1)
+                {
+                    perror("send");
+                    syslog(LOG_ERR, "send");
+                    return NULL;
+                }
+            }
+            close(read_fd);
+            send_enable = 0;
+        }
     }
+    syslog(LOG_DEBUG, "Closed connection from %s\n", thread_data->client_ip);
+    if (close(thread_data->client_fd))
+    {
+        perror("close");
+        syslog(LOG_ERR, "close failed.");
+    }
+
+    return NULL;
 }
 
 int main(int argc, char *argv[])
 {
+    SLIST_INIT(&head);
+
+    fd = open(DATA_FILE, O_WRONLY | O_CREAT | O_TRUNC | O_APPEND, 0664);
+
+    if (fd == -1)
+    {
+        syslog(LOG_ERR, "Failed to open %s: %s", DATA_FILE, strerror(errno));
+        clenanup(-1);
+    }
+
     int daemon_mode = 0;
     if (argc == 2 && strcmp(argv[1], "-d") == 0)
     {
@@ -105,20 +271,34 @@ int main(int argc, char *argv[])
         clenanup(-1);
     }
 
-    listen(sockfd, 1);
+    if (listen(sockfd, MAX_CLIENTS) < 0)
+    {
+        perror("Listen failed");
+        close(sockfd);
+        exit(EXIT_FAILURE);
+    }
+
+    // Start the timestamp thread HERE (after daemon fork, before accept loop)
+    if (pthread_create(&timer_thread_id, NULL, timestamp_thread, NULL) != 0)
+    {
+        syslog(LOG_ERR, "Failed to create timestamp thread");
+        clenanup(-1);
+    }
 
     socklen_t addr_size;
     struct sockaddr_storage their_addr;
-
     addr_size = sizeof their_addr;
-
     char client_ip[INET6_ADDRSTRLEN];
+
     while (!exit_flag)
     {
-        waiting_for_connection = 1;
-        new_fd = accept(sockfd, (struct sockaddr *)&their_addr, &addr_size);
-        waiting_for_connection = 0;
-        // Handle both IPv4 and IPv6
+        int client_socket = accept(sockfd, (struct sockaddr *)&their_addr, &addr_size);
+        if (client_socket < 0)
+        {
+            perror("Accept failed");
+            continue;
+        }
+
         if (their_addr.ss_family == AF_INET)
         {
             struct sockaddr_in *s = (struct sockaddr_in *)&their_addr;
@@ -133,106 +313,33 @@ int main(int argc, char *argv[])
         {
             strncpy(client_ip, "unknown", sizeof(client_ip));
         }
-
         syslog(LOG_INFO, "Accepted connection from %s\n", client_ip);
 
-        fd = open(DATA_FILE, O_RDWR | O_CREAT | O_APPEND, 0644);
-        if (fd == -1)
-        {
-            clenanup(-1);
-        }
-        char buffer[BUFFER_SIZE];
-        int packet_size = 0;
-        int packet_capacity = BUFFER_SIZE;
+        thread_list_t *thread_node = (thread_list_t *)malloc(sizeof(thread_list_t));
+        thread_node->client_fd = client_socket;
+        strcpy(thread_node->client_ip, client_ip);
 
-        packet = malloc(BUFFER_SIZE);
-        if (!packet)
+        if (pthread_create(&thread_node->thread_id, NULL, handle_client, thread_node) != 0)
         {
-            clenanup(-1);
+            perror("Thread creation failed");
+            close(client_socket);
+            continue;
         }
-        int bytes_received = 0;
+        SLIST_INSERT_HEAD(&head, thread_node, entries);
 
-        while (((bytes_received = recv(new_fd, buffer, sizeof(buffer) - 1, 0)) > 0) && (!exit_flag))
+        thread_list_t *current = SLIST_FIRST(&head);
+
+        while (current != NULL)
         {
-            for (int i = 0; i < bytes_received; i++)
+            thread_list_t *next = SLIST_NEXT(current, entries);
+            int ret = pthread_tryjoin_np(current->thread_id, NULL);
+            if (ret == 0)
             {
-                if (exit_flag)
-                {
-                    break;
-                }
-                // Expand packet buffer if needed
-                if (packet_size >= packet_capacity - 1)
-                {
-                    packet_capacity *= 2;
-                    char *new_packet = realloc(packet, packet_capacity);
-                    if (!new_packet)
-                    {
-                        clenanup(-1);
-                    }
-                    packet = new_packet;
-                }
-
-                // Add character to packet
-                packet[packet_size++] = buffer[i];
-
-                // Check if packet is complete (newline found)
-                if (buffer[i] == '\n')
-                {
-                    // Write packet to file
-                    if (write(fd, packet, packet_size) == -1)
-                    {
-                        syslog(LOG_ERR, "Error writing to file: %s", strerror(errno));
-                    }
-                    close(fd);
-
-                    // Open file for reading entire contents
-                    fd = open(DATA_FILE, O_RDONLY);
-                    if (fd == -1)
-                    {
-                        clenanup(-1);
-                    }
-                    // Send entire file contents back to client
-                    ssize_t bytes_read;
-                    char read_buffer[BUFFER_SIZE];
-                    while (((bytes_read = read(fd, read_buffer, sizeof(read_buffer))) > 0) && (!exit_flag))
-                    {
-                        ssize_t result = send(new_fd, read_buffer, bytes_read, 0);
-                        if (result == -1)
-                        {
-                            clenanup(-1);
-                        }
-                    }
-                    close(fd);
-
-                    // Reset packet for next one and reopen file for append
-                    packet_size = 0;
-                    fd = open(DATA_FILE, O_WRONLY | O_CREAT | O_APPEND, 0644);
-                    if (fd == -1)
-                    {
-                        clenanup(-1);
-                    }
-                }
+                SLIST_REMOVE(&head, current, thread_list_s, entries);
+                free(current);
             }
+            current = next;
         }
-
-        // Clean up after recv loop ends
-        if (packet)
-        {
-            free(packet);
-            packet = NULL;
-        }
-        if (fd != -1)
-        {
-            close(fd);
-            fd = -1;
-        }
-        if (new_fd != -1)
-        {
-            close(new_fd);
-            new_fd = -1;
-        }
-
-        syslog(LOG_INFO, "Closed connection from %s", client_ip);
     }
     clenanup(0);
     return 0;
