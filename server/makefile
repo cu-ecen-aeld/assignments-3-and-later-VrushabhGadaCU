@@ -1,16 +1,18 @@
-CC ?= gcc
-CFLAGS = -Wall -Wextra -O3
+CC ?= $(CROSS_COMPILE)gcc
+CFLAGS ?= -Wall -Wextra -O3
+LDFLAGS ?= -pthread -lrt
+
 TARGET = aesdsocket
 SRCS = aesdsocket.c
+OBJS = $(SRCS:.c=.o)
 
-ifdef CROSS_COMPILE
-    CC = $(CROSS_COMPILE)gcc
-endif
+all: $(TARGET)
 
-all default: $(TARGET)
+$(TARGET): $(OBJS)
+	$(CC) $(CFLAGS) -o $@ $(OBJS) $(LDFLAGS)
 
-$(TARGET): $(SRCS)
-	$(CC) $(CFLAGS) $< -o $@
+%.o: %.c
+	$(CC) $(CFLAGS) -c $< -o $@
 
 clean:
-	rm -f $(TARGET)
+	rm -f $(TARGET) $(OBJS)
