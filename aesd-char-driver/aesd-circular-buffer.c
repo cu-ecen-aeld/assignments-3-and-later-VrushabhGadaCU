@@ -32,6 +32,12 @@ struct aesd_buffer_entry *aesd_circular_buffer_find_entry_offset_for_fpos(struct
     /**
      * COMPLETED: implement per description
      */
+
+    if (buffer == NULL || entry_offset_byte_rtn == NULL)
+    {
+        return NULL;
+    }
+
     size_t remaining_offset = char_offset;
     uint8_t location = buffer->out_offs;
     size_t entry_size;
@@ -67,6 +73,11 @@ void aesd_circular_buffer_add_entry(struct aesd_circular_buffer *buffer, const s
     /**
      * COMPLETED: implement per description
      */
+
+    if (buffer == NULL || add_entry == NULL)
+    {
+        return;
+    }
 
     if (buffer->full)
     {
