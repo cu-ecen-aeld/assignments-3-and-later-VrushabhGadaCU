@@ -74,7 +74,7 @@ char *aesd_circular_buffer_add_entry(struct aesd_circular_buffer *buffer, const 
      * COMPLETED: implement per description
      */
 
-    const char *replaced_entry = NULL;
+    char *replaced_entry = NULL;
 
     if (buffer == NULL || add_entry == NULL)
     {
