@@ -16,7 +16,17 @@
 #include <time.h>
 #include <signal.h>
 
+#ifndef USE_AESD_CHAR_DEVICE
+#define USE_AESD_CHAR_DEVICE 1 // default to 1
+#endif
+
+
+#if USE_AESD_CHAR_DEVICE
+#define DATA_FILE "/dev/aesdchar"
+#else
 #define DATA_FILE "/var/tmp/aesdsocketdata"
+#endif
+
 pthread_t Timer_Thread_id;
 
 volatile sig_atomic_t exitFlag = 0;
@@ -45,9 +55,11 @@ void cleanup(int returnValue)
         close(ServerSocket);
         ServerSocket = -1;
     }
+#if !USE_AESD_CHAR_DEVICE
 
     pthread_join(Timer_Thread_id, NULL);
     printf("Joined timer thread.\n");
+#endif
 
     thread_list_t *current = SLIST_FIRST(&head);
     thread_list_t *temp_var;
@@ -270,13 +282,15 @@ int main(int argc, char *argv[])
         exit(1);
     }
 
-    // Start timestamp thread
+// Start timestamp thread
+#if !USE_AESD_CHAR_DEVICE
     ret = pthread_create(&Timer_Thread_id, NULL, timestamp_thread, NULL);
     if (ret)
     {
         perror("pthread_create");
         exit(1);
     }
+#endif
 
     socklen_t addr_size;
     struct sockaddr_storage their_addr;
