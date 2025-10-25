@@ -15,11 +15,11 @@
 #include <stdatomic.h>
 #include <time.h>
 #include <signal.h>
+#include "../aesd-char-driver/aesd_ioctl.h"
 
 #ifndef USE_AESD_CHAR_DEVICE
 #define USE_AESD_CHAR_DEVICE 1 // default to 1
 #endif
-
 
 #if USE_AESD_CHAR_DEVICE
 #define DATA_FILE "/dev/aesdchar"
@@ -169,6 +169,7 @@ void *client_handler(void *arg)
     thread_list_t *thread_data = (thread_list_t *)arg;
     int bytes_received;
     char buffer[1024];
+    char send_buf[1024];
     int SendData = 0;
     int fd;
     while (!exitFlag)
@@ -187,6 +188,65 @@ void *client_handler(void *arg)
             }
 
             pthread_mutex_lock(&mutex_lock);
+            // Check for ioctl command present or not
+            if (strncmp(buffer, "AESDCHAR_IOCSEEKTO:", 19) == 0)
+            {
+                unsigned int write_cmd, offset;
+
+                if (sscanf(buffer, "AESDCHAR_IOCSEEKTO:%u,%u", &write_cmd, &offset) == 2)
+                {
+                    struct aesd_seekto seekto;
+                    seekto.write_cmd = write_cmd;
+                    seekto.write_cmd_offset = offset;
+
+                    int iofd = open(DATA_FILE, O_RDWR);
+                    if (iofd == -1)
+                    {
+                        perror("open");
+                        syslog(LOG_ERR, "open");
+                        pthread_mutex_unlock(&mutex_lock);
+                        return NULL;
+                    }
+
+                    int result_ret = ioctl(iofd, AESDCHAR_IOCSEEKTO, &seekto);
+                    if (result_ret == -1)
+                    {
+                        perror("ioctl");
+                        syslog(LOG_ERR, "ioctl");
+                        close(iofd);
+                        pthread_mutex_unlock(&mutex_lock);
+                        return NULL;
+                    }
+                    int ret_byte;
+                    while ((ret_byte = read(iofd, send_buf, sizeof(send_buf))) > 0)
+                    {
+                        if (ret_byte == -1)
+                        {
+                            perror("read");
+                            syslog(LOG_ERR, "read");
+                            pthread_mutex_unlock(&mutex_lock);
+                            return NULL;
+                        }
+
+                        int bytes_to_send = ret_byte;
+                        ret_byte = send(thread_data->client_fd, send_buf, bytes_to_send, 0);
+                        if (ret_byte == -1)
+                        {
+                            perror("send");
+                            syslog(LOG_ERR, "send");
+                            close(iofd);
+                            pthread_mutex_unlock(&mutex_lock);
+                            return NULL;
+                        }
+                    }
+
+                    close(iofd);
+                }
+
+                pthread_mutex_unlock(&mutex_lock);
+                continue;
+            }
+
             fd = open(DATA_FILE, O_WRONLY | O_APPEND | O_CREAT, 0664);
             if (fd == -1)
             {
