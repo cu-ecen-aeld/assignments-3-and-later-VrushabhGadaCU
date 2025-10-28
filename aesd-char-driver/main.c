@@ -18,6 +18,8 @@
 #include <linux/cdev.h>
 #include <linux/fs.h> // file_operations
 #include "aesdchar.h"
+#include "aesd_ioctl.h"
+
 int aesd_major = 0; // use dynamic major
 int aesd_minor = 0;
 
@@ -154,12 +156,149 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
     return retval;
 }
 
+/**
+ * @brief llseek implementation for AESD character device
+ *
+ * This function handles seeking within the AESD device file. It computes the total size
+ * of all entries currently stored in the circular buffer and then uses `fixed_size_llseek`
+ * to update the file position based on the given offset and whence.
+ */
+loff_t aesd_llseek(struct file *filp, loff_t off, int whence)
+{
+    struct aesd_dev *dev = filp->private_data;
+    size_t total_size = 0;
+    size_t i;
+    loff_t retval;
+
+    // Acquire the device mutex to ensure thread-safe access
+    if (mutex_lock_interruptible(&dev->lock))
+        return -ERESTARTSYS;
+
+    // Calculate total size of valid data in the circular buffer
+    struct aesd_buffer_entry *entry;
+    AESD_CIRCULAR_BUFFER_FOREACH(entry, &dev->buffer, i)
+    {
+        total_size += entry->size;
+    }
+
+    // Use kernel helper to perform seek within valid data range
+    retval = fixed_size_llseek(filp, off, whence, total_size);
+
+    // Release the mutex before returning
+    mutex_unlock(&dev->lock);
+    return retval;
+}
+
+/**
+ * @brief Adjust file offset based on write command and offset within that command
+ *
+ * This function is called by the AESDCHAR_IOCSEEKTO ioctl command.
+ * It computes the absolute file offset corresponding to the given write command
+ * index (`write_cmd`) and the byte offset within that command (`write_cmd_offset`).
+ */
+static long aesd_adjust_file_offset(struct file *filp, unsigned int write_cmd, unsigned int write_cmd_offset)
+{
+    // Validate command index
+    if (write_cmd >= AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED)
+        return -EINVAL;
+
+    struct aesd_dev *dev = filp->private_data;
+    uint8_t index;
+    struct aesd_buffer_entry *entry;
+    int retval = 0;
+    unsigned int start_offset = 0;
+
+    // Lock device for safe access to circular buffer
+    if (mutex_lock_interruptible(&dev->lock))
+        return -ERESTARTSYS;
+
+    // Start from the oldest valid entry in the circular buffer
+    index = dev->buffer.out_offs;
+
+
+    // Traverse buffer entries until reaching the target command
+    for (unsigned int i = 0; i <= write_cmd; i++)
+    {
+        entry = &dev->buffer.entry[index];
+
+        if (i == write_cmd)
+        {
+            // Validate offset within target entry
+            if (write_cmd_offset >= entry->size)
+            {
+                retval = -EINVAL;
+                mutex_unlock(&dev->lock);
+                return retval;
+            }
+            // Compute absolute byte position within device data
+            start_offset += write_cmd_offset;
+            break;
+        }
+        else
+        {
+            // Accumulate sizes of prior entries
+            start_offset += entry->size;
+        }
+
+        // Move to next circular buffer entry
+        index = (index + 1) % AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED;
+    }
+
+    // Update file position to computed offset
+    filp->f_pos = start_offset;
+
+    // Unlock before returning
+    mutex_unlock(&dev->lock);
+    return retval;
+}
+
+/**
+ * @brief IOCTL handler for AESD character device
+ *
+ * Supports the AESDCHAR_IOCSEEKTO command to reposition the file offset
+ * based on a specific write command and offset provided by the user.
+ */
+long aesd_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
+{
+    int retval = 0;
+
+    // Validate magic number and command number
+    if (_IOC_TYPE(cmd) != AESD_IOC_MAGIC)
+        return -ENOTTY;
+    if (_IOC_NR(cmd) > AESDCHAR_IOC_MAXNR)
+        return -ENOTTY;
+
+    switch (cmd)
+    {
+    case AESDCHAR_IOCSEEKTO:
+    {
+        struct aesd_seekto seekto;
+
+        // Copy parameters from user space
+        if (copy_from_user(&seekto, (const void __user *)arg, sizeof(seekto)) != 0)
+            retval = EFAULT;
+        else
+            // Adjust file offset based on provided seek parameters
+            retval = aesd_adjust_file_offset(filp, seekto.write_cmd, seekto.write_cmd_offset);
+        break;
+    }
+
+    default:
+        // Invalid or unsupported command
+        return -ENOTTY;
+    }
+
+    return retval;
+}
+
 struct file_operations aesd_fops = {
     .owner = THIS_MODULE,
     .read = aesd_read,
     .write = aesd_write,
     .open = aesd_open,
     .release = aesd_release,
+    .llseek = aesd_llseek,
+    .unlocked_ioctl = aesd_ioctl,
 };
 
 static int aesd_setup_cdev(struct aesd_dev *dev)
